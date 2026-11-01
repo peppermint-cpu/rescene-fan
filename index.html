@@ -1,147 +1,455 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ko">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>RESCENE FAN PORTAL - 리센느 팬 사이트</title>
-    <!-- Tailwind CSS CDN -->
-    <script src="https://cdn.tailwindcss.com"></script>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="description" content="리센느(RESCENE) 팬 사이트. 최신 소식, 디스코그래피, 멤버 정보와 팬 커뮤니티.">
+<title>리센느 팬 사이트</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23D0304D'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500..800&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+KR:wght@400;500;700&display=swap">
+
+<!--
+=====================================================================
+ 설치 순서 (Supabase 무료 계정 + Render 정적 사이트)
+
+ 1. supabase.com 에서 새 프로젝트를 만든다.
+ 2. 왼쪽 메뉴 SQL Editor 에 아래 SQL 전체를 붙여 넣고 Run 한다.
+ 3. Project Settings > API 의 Project URL 과 anon public key 를
+    아래 script 맨 위의 CFG 에 붙여 넣는다.
+ 4. (선택) Authentication > Providers > Email 에서 Confirm email 을 끄면
+    가입 즉시 로그인된다. 켜 두면 인증 메일을 확인해야 한다.
+ 5. Authentication > URL Configuration 의 Site URL 에 Render 주소를 넣는다.
+ 6. 이 index.html 을 Render 의 Static Site 로 배포한다
+    (Build Command 비움, Publish Directory 는 . ).
+ 7. 사이트에서 먼저 가입한 뒤, SQL Editor 에서 아래 한 줄로 관리자를 지정한다.
+    update profiles set is_admin = true where id = (select id from auth.users where email = '내이메일');
+
+=== SQL 시작 ===
+create table profiles (
+  id uuid primary key references auth.users on delete cascade,
+  nick text not null unique check (char_length(nick) between 2 and 12),
+  is_admin boolean not null default false,
+  created_at timestamptz not null default now()
+);
+create table news (
+  id bigint generated always as identity primary key,
+  tag text not null, title text not null, body text not null, url text,
+  date date not null default current_date
+);
+create table releases (
+  id text primary key, title text not null, kind text not null,
+  date date not null, dl text, note text, tracks text[] not null default '{}'
+);
+create table settings (key text primary key, value jsonb not null);
+create table posts (
+  id bigint generated always as identity primary key,
+  user_id uuid not null default auth.uid() references profiles(id) on delete cascade,
+  cat text not null,
+  title text not null check (char_length(title) <= 60),
+  body text not null check (char_length(body) <= 1500),
+  created_at timestamptz not null default now()
+);
+create table comments (
+  id bigint generated always as identity primary key,
+  post_id bigint not null references posts(id) on delete cascade,
+  user_id uuid not null default auth.uid() references profiles(id) on delete cascade,
+  body text not null check (char_length(body) <= 300),
+  created_at timestamptz not null default now()
+);
+create table likes (
+  post_id bigint not null references posts(id) on delete cascade,
+  user_id uuid not null default auth.uid() references profiles(id) on delete cascade,
+  primary key (post_id, user_id)
+);
+create index on posts (created_at desc);
+create index on comments (post_id);
+
+create function is_admin() returns boolean language sql stable security definer set search_path = public
+as $$ select coalesce((select is_admin from profiles where id = auth.uid()), false) $$;
+
+create function handle_new_user() returns trigger language plpgsql security definer set search_path = public
+as $$ begin
+  insert into profiles (id, nick)
+  values (new.id, coalesce(new.raw_user_meta_data->>'nick', 'fan' || substr(replace(new.id::text, '-', ''), 1, 8)));
+  return new;
+end $$;
+create trigger on_auth_user_created after insert on auth.users
+  for each row execute function handle_new_user();
+
+create function delete_me() returns void language sql security definer set search_path = public
+as $$ delete from auth.users where id = auth.uid() $$;
+revoke execute on function delete_me() from public, anon;
+grant execute on function delete_me() to authenticated;
+
+alter table profiles enable row level security;
+alter table news enable row level security;
+alter table releases enable row level security;
+alter table settings enable row level security;
+alter table posts enable row level security;
+alter table comments enable row level security;
+alter table likes enable row level security;
+
+create policy read_all on profiles for select using (true);
+create policy read_all on news for select using (true);
+create policy read_all on releases for select using (true);
+create policy read_all on settings for select using (true);
+create policy read_all on posts for select using (true);
+create policy read_all on comments for select using (true);
+create policy read_all on likes for select using (true);
+
+create policy admin_write on news for all using (is_admin()) with check (is_admin());
+create policy admin_write on releases for all using (is_admin()) with check (is_admin());
+create policy admin_write on settings for all using (is_admin()) with check (is_admin());
+
+create policy own_nick on profiles for update using (id = auth.uid()) with check (id = auth.uid());
+revoke update on profiles from anon, authenticated;
+grant update (nick) on profiles to authenticated;
+
+create policy post_add on posts for insert with check (user_id = auth.uid());
+create policy post_del on posts for delete using (user_id = auth.uid() or is_admin());
+create policy comment_add on comments for insert with check (user_id = auth.uid());
+create policy comment_del on comments for delete using (user_id = auth.uid() or is_admin());
+create policy like_add on likes for insert with check (user_id = auth.uid());
+create policy like_del on likes for delete using (user_id = auth.uid());
+
+alter publication supabase_realtime add table news, releases, settings, posts, comments, likes, profiles;
+
+insert into settings values ('hero', '{"title":"PULSE","sub":"네 번째 미니앨범","date":"2026-11-03","blurb":"향기 콘셉트를 이어가는 리센느의 새로운 컴백."}');
+
+insert into news (tag, title, body, url, date) values
+('프로모션','PULSE 프로모션 스케줄러 공개','공식 SNS에 네 번째 미니앨범 ''PULSE''의 프로모션 스케줄러 영상이 올라오며 본격적인 컴백 준비에 들어갔어요.','https://www.ytn.co.kr/_ln/0117_202610131039493415','2026-10-12'),
+('컴백','네 번째 미니앨범 PULSE, 11월 3일 발매','소속사가 11월 3일 새 앨범으로 컴백한다고 알렸어요. 향기를 테마로 한 활동이 이어져요.','https://isplus.com/article/view/isp202609180083','2026-09-18'),
+('활동','KCON 참석차 미국 로스앤젤레스로 출국','다섯 멤버가 KCON 일정을 위해 인천공항에서 로스앤젤레스로 떠났어요.','https://isplus.com/article/view/isp202609180083','2026-08-12'),
+('음악방송','Pretty Girl 활동 마무리, 데뷔 첫 음악방송 1위','SBS Life ''더쇼''에서 데뷔 후 처음으로 1위를 차지했어요. ''LOVE ATTACK''과 ''Deja Vu'' 스페셜 무대도 선보였어요.','https://sports.khan.co.kr/article/202607220602003','2026-07-22'),
+('음악방송','컴백 첫 주 마무리, LOVE ATTACK 1위 후보','엠카운트다운에서 원곡 가수 카라의 니콜이 깜짝 등장해 함께 무대를 꾸몄고, 원이와 미나미는 인기가요 스페셜 MC를 맡았어요.','https://sports.khan.co.kr/article/202607132232003','2026-07-13'),
+('차트','Pretty Girl, 멜론 HOT100 1위','공개 직후 멜론 HOT100 1위에 올랐고, ''LOVE ATTACK''도 멜론 TOP100 정상에 오르며 역주행을 이어갔어요.','https://www.newdaily.co.kr/site/data/html/2026/07/13/2026071300109.amp.html','2026-07-13'),
+('프로모션','Pretty Girl 챌린지 영상과 ''비밀 옷장'' 사이트 공개','따라 하기 쉬운 포인트 안무 영상과 함께, 팬이 캐릭터를 꾸밀 수 있는 웹사이트를 열었어요.','https://sports.khan.co.kr/article/202607022314013/amp','2026-07-01'),
+('음악방송','엠카운트다운 스페셜 스테이지로 LOVE ATTACK 재소환','음원 차트 역주행에 힘입어 ''LOVE ATTACK'' 스페셜 무대를 선보였어요.','https://www.hankyung.com/article/202606195938H','2026-06-18'),
+('컴백','7월, 데뷔 첫 리메이크 싱글로 컴백 확정','소속사가 7월 리메이크 디지털 싱글 컴백을 예고했어요.','https://sports.khan.co.kr/article/202605221702003','2026-05-22'),
+('컴백','첫 디지털 싱글 ''Runaway'' 발매','메인 향기는 인센스예요. 뮤직비디오 티저와 카운트다운 라이브로 컴백을 알렸어요.','https://sports.khan.co.kr/article/202604081942003','2026-04-08');
+
+insert into releases (id, title, kind, date, dl, note, tracks) values
+('pulse','PULSE','mini','2026-11-03',null,'네 번째 미니앨범. 향기 콘셉트를 이어가는 컴백이에요.','{}'),
+('pretty-girl','Pretty Girl','single','2026-07-08',null,'카라(KARA)의 2008년 곡을 재해석한 첫 리메이크 싱글. 메인 향기는 자몽이에요.',array['Pretty Girl']),
+('runaway','Runaway','single','2026-04-08',null,'첫 번째 디지털 싱글. 메인 향기는 인센스예요.',array['Runaway']),
+('busy-boy','Busy Boy','collab','2026-02-27',null,'Aria PIG Entertainment와 함께한 글로벌 콜라보 프로젝트 [Rescene X ???]의 곡이에요.',array['Busy Boy']),
+('pinball','ピンボール (Pinball)','jp','2026-01-21','2026 초','일본어 디지털 싱글. 한국과 일본 유튜브 쇼츠 인기곡 차트에 동시에 올랐어요.',array['ピンボール (Pinball)']),
+('lip-bomb','lip bomb','mini','2025-11-25',null,'세 번째 미니앨범. 자체 초동 신기록을 세웠고 미국 포브스의 ''2025년 비평가들의 호평을 받은 K-팝 앨범''에 꼽혔어요.',array['Heart Drop (선공개)']),
+('heart-drop','Heart Drop','single','2025-11-06',null,'lip bomb의 선공개곡.',array['Heart Drop']),
+('glow-up-en','Glow Up (English Version)','single','2025-02-17',null,'Glow Up의 영어 버전.',array['Glow Up (English Version)']),
+('glow-up','Glow Up','mini','2025-02-05',null,'두 번째 미니앨범.',array['Glow Up (타이틀)']),
+('scenedrome','SCENEDROME','mini','2024-08-27',null,'첫 번째 미니앨범. 바닷속 향기를 담았고, 타이틀곡 LOVE ATTACK은 2026년 역주행으로 멜론 TOP100 1위에 올랐어요.',array['LOVE ATTACK (타이틀)']),
+('yoyo-jp','YoYo (Japanese Version)','jp','2024-08-16',null,'YoYo의 일본어 버전.',array['YoYo (Japanese Version)']),
+('counting-star','Counting Star (The Magic Star X RESCENE)','collab','2024-06-26',null,'The Magic Star와의 콜라보 디지털 싱글.',array['Counting Star']),
+('re-scene','Re:Scene','sa','2024-03-26',null,'데뷔 싱글 앨범.',array['UhUh (타이틀)']),
+('yoyo','YoYo','single','2024-02-29',null,'데뷔 전에 공개한 디지털 싱글.',array['YoYo']);
+=== SQL 끝 ===
+=====================================================================
+-->
+
+<style>
+/* Layout: slim sticky header with underline tabs. One oversized wordmark (the next release) carries the page; everything else is quiet ruled rows, and posts are the only cards. */
+:root{
+color-scheme:light dark;
+--bg:#F7F7F9;--sf:#FFFFFF;--ink:#14151B;--mute:#656879;--line:#E3E4EA;
+--ac:#D0304D;--ac-ink:#FFFFFF;--ac-soft:#FCE9ED;
+--f-d:'Bricolage Grotesque','Noto Sans KR',system-ui,sans-serif;
+--f-b:'Noto Sans KR',system-ui,-apple-system,'Apple SD Gothic Neo',sans-serif;
+--f-m:'JetBrains Mono',ui-monospace,Menlo,monospace}
+@media (prefers-color-scheme:dark){:root{--bg:#0E0F14;--sf:#171822;--ink:#F0F0F5;--mute:#9C9FB0;--line:#272938;--ac:#FF6F89;--ac-ink:#1A0A0F;--ac-soft:#2B1820}}
+
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.65 var(--f-b);-webkit-text-size-adjust:100%;
+padding:env(safe-area-inset-top,0px) max(16px,env(safe-area-inset-right,0px)) env(safe-area-inset-bottom,0px) max(16px,env(safe-area-inset-left,0px))}
+.w{max-width:1040px;margin:0 auto}
+a{color:var(--ac)}
+h2,h3,p{margin:0}
+h2{font:700 20px/1.3 var(--f-d)}
+h3{font:700 16px/1.4 var(--f-b)}
+:focus-visible{outline:2px solid var(--ac);outline-offset:2px}
+.mono{font:400 13px var(--f-m);color:var(--mute);font-variant-numeric:tabular-nums}
+.dim{color:var(--mute)}
+[hidden]{display:none!important}
+
+header{position:sticky;top:0;z-index:9;background:var(--bg);border-bottom:1px solid var(--line)}
+.bar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding-block:12px}
+.brand{font:800 20px/1 var(--f-d);letter-spacing:.06em;text-decoration:none;color:var(--ink)}
+.brand i{font:500 10px var(--f-m);font-style:normal;color:var(--ac);margin-left:8px;letter-spacing:.14em}
+#acct{display:flex;align-items:center;gap:8px}
+nav{display:flex;gap:2px;overflow-x:auto;scrollbar-width:none}
+nav a{padding:10px 14px;text-decoration:none;color:var(--mute);font-weight:500;white-space:nowrap;border-bottom:2px solid transparent}
+nav a[aria-current=page]{color:var(--ink);border-color:var(--ac)}
+main{padding-block:8px 48px}
+
+.btn,.chip,.who,.lnk{font:500 14px var(--f-b);cursor:pointer}
+.btn{background:var(--ac);color:var(--ac-ink);border:1px solid var(--ac);border-radius:999px;padding:8px 18px}
+.btn.g{background:none;color:var(--ink);border-color:var(--line)}
+.chip{background:none;color:var(--mute);border:1px solid var(--line);border-radius:999px;padding:5px 14px;font-size:13px}
+.chip[aria-pressed=true]{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.who{display:flex;align-items:center;gap:8px;background:none;color:var(--ink);border:1px solid var(--line);border-radius:999px;padding:6px 14px}
+.lnk{background:none;border:0;color:var(--mute);padding:0;font-size:13px;text-decoration:underline}
+.tag{display:inline-block;font:500 12px/1.6 var(--f-b);padding:0 9px;border-radius:999px;background:var(--ac-soft);color:var(--ac);margin-right:6px}
+.tag.n{background:var(--line);color:var(--mute)}
+.tag.f{background:var(--ac);color:var(--ac-ink)}
+
+.hero{padding-block:44px 20px;display:grid;gap:10px}
+.eye{font:500 12px var(--f-m);letter-spacing:.16em;color:var(--ac)}
+h1{font:800 clamp(60px,17vw,176px)/.88 var(--f-d);letter-spacing:-.045em;margin:0}
+.hrow{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:16px}
+.hrow p{max-width:46ch}
+.dd{font:500 clamp(26px,6vw,40px)/1 var(--f-m);font-variant-numeric:tabular-nums;border:1px solid var(--line);border-radius:12px;padding:12px 18px;background:var(--sf)}
+.pl{width:100%;height:56px;color:var(--ac);display:block}
+.pl path{fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:1;animation:dr 2.4s ease-out}
+@keyframes dr{from{stroke-dashoffset:1}to{stroke-dashoffset:0}}
+@media (prefers-reduced-motion:reduce){.pl path{animation:none}}
+
+.sec{padding-block:28px 8px}
+.sh{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap;margin-block:28px 10px}
+.sec .sh{margin-top:0}
+.row{display:grid;grid-template-columns:104px minmax(0,1fr);gap:4px 20px;padding-block:18px;border-top:1px solid var(--line)}
+.row>div{min-width:0;display:grid;gap:4px;justify-items:start}
+.row p{color:var(--mute)}
+.row .tr{font-size:13px}
+@media (max-width:560px){.row{grid-template-columns:minmax(0,1fr)}}
+
+.stat{display:flex;gap:28px;flex-wrap:wrap;margin-block:12px 16px}
+.stat b{font:700 28px/1 var(--f-d);display:block}
+.mem{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:0 20px;margin-top:20px}
+.mem div{border-top:1px solid var(--line);padding-block:20px 24px;display:grid;gap:2px;align-content:start}
+.mem b{font:800 34px/1.1 var(--f-d);letter-spacing:-.02em}
+.mem small{color:var(--mute)}
+
+.ctl{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-block:8px 16px}
+.ctl .sp{flex:1}
+.feed{display:grid;gap:12px}
+.post{background:var(--sf);border:1px solid var(--line);border-radius:12px;padding:16px;display:grid;gap:8px;min-width:0}
+.meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px;color:var(--mute)}
+.meta b{color:var(--ink)}
+.bd{white-space:pre-wrap;overflow-wrap:anywhere}
+.acts{display:flex;gap:16px;align-items:center}
+.acts button{background:none;border:0;color:var(--mute);font:500 13px var(--f-b);cursor:pointer;padding:4px 0;display:flex;gap:6px;align-items:center}
+.acts svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2}
+.acts .on{color:var(--ac)}.acts .on svg{fill:currentColor}
+.cms{border-top:1px solid var(--line);padding-top:10px;display:grid;gap:8px}
+.cm{font-size:14px;overflow-wrap:anywhere}.cm b{margin-right:6px}.cm small{color:var(--mute);margin-left:6px}
+.cf{display:flex;gap:8px}.cf input{flex:1;min-width:0}
+
+.box,.gate{border:1px solid var(--line);background:var(--sf);border-radius:12px;padding:20px;display:grid;gap:14px;margin-block:16px}
+.gate{justify-items:start}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+label{display:grid;gap:4px;font-size:13px;color:var(--mute)}
+input,textarea,select{font:inherit;font-size:16px;background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:9px 12px;width:100%}
+textarea{min-height:120px;resize:vertical}
+.ck{display:flex;gap:8px;align-items:center;color:var(--ink)}.ck input{width:auto}
+.btns{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.rules{margin:0;padding-left:18px;color:var(--mute);font-size:13px}
+
+#sheet{position:fixed;inset:0;z-index:20;background:rgba(0,0,0,.5);display:grid;place-items:center;padding:16px}
+#sp{background:var(--sf);border:1px solid var(--line);border-radius:14px;padding:24px;max-width:420px;width:100%;max-height:100%;overflow:auto;display:grid;gap:14px}
+#sp hr{border:0;border-top:1px solid var(--line);width:100%;margin:0}
+#sp form{display:grid;gap:14px}
+#toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(16px + env(safe-area-inset-bottom,0px));z-index:30;background:var(--ink);color:var(--bg);padding:10px 18px;border-radius:999px;font-size:14px;max-width:calc(100% - 32px)}
+footer{padding-block:24px 40px;border-top:1px solid var(--line);color:var(--mute);font-size:12px}
+</style>
 </head>
-<body class="bg-slate-50 text-slate-800 font-sans">
+<body>
 
-    <!-- Header -->
-    <header class="bg-white shadow-sm sticky top-0 z-50">
-        <div class="max-w-6xl mx-auto px-4 py-4 flex justify-between items-center">
-            <h1 class="text-2xl font-black text-rose-500 tracking-wider">RE:SCENE</h1>
-            <nav class="space-x-6 font-medium text-sm">
-                <a href="#about" class="hover:text-rose-500 transition">멤버 소개</a>
-                <a href="#streaming" class="hover:text-rose-500 transition">음악 & 스트리밍</a>
-                <a href="#news" class="hover:text-rose-500 transition">새 소식 (자동)</a>
-            </nav>
-        </div>
-    </header>
+<header class="w">
+<div class="bar"><a class="brand" href="#home">RESCENE<i>FAN</i></a><div id="acct"></div></div>
+<nav aria-label="주요 메뉴"><a href="#home">홈</a><a href="#news">소식</a><a href="#music">음악</a><a href="#members">멤버</a><a href="#board">커뮤니티</a></nav>
+</header>
 
-    <!-- Hero Section -->
-    <section class="bg-gradient-to-r from-rose-400 to-pink-500 text-white py-20 text-center">
-        <div class="max-w-4xl mx-auto px-4">
-            <h2 class="text-4xl md:text-5xl font-extrabold mb-4">The World of RESCENE</h2>
-            <p class="text-lg opacity-90">향기로 기억되는 공간, 리센느(Woni, Liv, Minami, May, Zena) 팬 아카이브</p>
-        </div>
-    </section>
+<main class="w">
+<section id="p-home"><div id="v-home"></div></section>
+<section id="p-news" hidden>
+<form id="nf" class="box" hidden>
+<label for="nt">제목<input id="nt" name="t" maxlength="80" required autocomplete="off"></label>
+<div class="two"><label for="ng">분류<select id="ng" name="g"></select></label><label for="nd">날짜<input id="nd" name="d" type="date" required></label></div>
+<label for="nb">내용<textarea id="nb" name="b" maxlength="300" required></textarea></label>
+<label for="nu">기사 링크 (선택)<input id="nu" name="u" type="url" placeholder="https://"></label>
+<div class="btns"><button class="btn">소식 등록</button><button type="button" class="btn g" data-a="nform">취소</button></div>
+</form>
+<div id="v-news"></div>
+</section>
+<section id="p-music" hidden><div id="v-music"></div></section>
+<section id="p-members" hidden><div id="v-members"></div></section>
+<section id="p-board" hidden>
+<form id="pf" class="box" hidden>
+<label for="pc">분류<select id="pc" name="c"></select></label>
+<label for="pt">제목<input id="pt" name="t" maxlength="60" required autocomplete="off"></label>
+<label for="pb">내용<textarea id="pb" name="b" maxlength="1500" required></textarea></label>
+<div class="btns"><button class="btn">등록</button><button type="button" class="btn g" data-a="write">취소</button></div>
+</form>
+<div id="v-board"></div>
+</section>
+</main>
 
-    <main class="max-w-6xl mx-auto px-4 py-12 space-y-20">
+<footer class="w">팬이 만든 비공식 사이트이며 더뮤즈엔터테인먼트 및 리센느와 관련이 없습니다. 소식은 공개된 기사를 바탕으로 정리해요.</footer>
 
-        <!-- Members Section -->
-        <section id="about">
-            <h3 class="text-2xl font-bold mb-8 text-center border-b pb-4">Members Profile</h3>
-            <div class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-6">
-                <!-- 원이 -->
-                <div class="bg-white p-5 rounded-2xl shadow-sm text-center border border-slate-100">
-                    <div class="w-24 h-24 bg-rose-100 rounded-full mx-auto mb-4 flex items-center text-rose-500 font-bold justify-center text-xl">WONEE</div>
-                    <h4 class="font-bold text-lg">원이 (Woni)</h4>
-                    <p class="text-xs text-slate-400 mb-2">2004.05.25</p>
-                    <p class="text-sm text-slate-600">리더 / 보컬 / 댄서</p>
-                </div>
-                <!-- 리브 -->
-                <div class="bg-white p-5 rounded-2xl shadow-sm text-center border border-slate-100">
-                    <div class="w-24 h-24 bg-rose-100 rounded-full mx-auto mb-4 flex items-center text-rose-500 font-bold justify-center text-xl">LIV</div>
-                    <h4 class="font-bold text-lg">리브 (Liv)</h4>
-                    <p class="text-xs text-slate-400 mb-2">2006.10.11</p>
-                    <p class="text-sm text-slate-600">보컬</p>
-                </div>
-                <!-- 미나미 -->
-                <div class="bg-white p-5 rounded-2xl shadow-sm text-center border border-slate-100">
-                    <div class="w-24 h-24 bg-rose-100 rounded-full mx-auto mb-4 flex items-center text-rose-500 font-bold justify-center text-xl">MINAMI</div>
-                    <h4 class="font-bold text-lg">미나미 (Minami)</h4>
-                    <p class="text-xs text-slate-400 mb-2">2006.11.29 (일본)</p>
-                    <p class="text-sm text-slate-600">메인보컬 / 댄서</p>
-                </div>
-                <!-- 메이 -->
-                <div class="bg-white p-5 rounded-2xl shadow-sm text-center border border-slate-100">
-                    <div class="w-24 h-24 bg-rose-100 rounded-full mx-auto mb-4 flex items-center text-rose-500 font-bold justify-center text-xl">MAY</div>
-                    <h4 class="font-bold text-lg">메이 (May)</h4>
-                    <p class="text-xs text-slate-400 mb-2">2008.08.19</p>
-                    <p class="text-sm text-slate-600">댄서 / 보컬</p>
-                </div>
-                <!-- 제나 -->
-                <div class="bg-white p-5 rounded-2xl shadow-sm text-center border border-slate-100">
-                    <div class="w-24 h-24 bg-rose-100 rounded-full mx-auto mb-4 flex items-center text-rose-500 font-bold justify-center text-xl">ZENA</div>
-                    <h4 class="font-bold text-lg">제나 (Zena)</h4>
-                    <p class="text-xs text-slate-400 mb-2">2008.11.27</p>
-                    <p class="text-sm text-slate-600">랩 / 보컬 / 막내</p>
-                </div>
-            </div>
-        </section>
+<div id="sheet" hidden><div id="sp" role="dialog" aria-modal="true"></div></div>
+<div id="toast" role="status" aria-live="polite" hidden></div>
 
-        <!-- Streaming & Music Section -->
-        <section id="streaming">
-            <h3 class="text-2xl font-bold mb-8 text-center border-b pb-4">Music & Streaming</h3>
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-8 items-center bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
-                <div>
-                    <h4 class="text-xl font-bold mb-2 text-rose-500">최신 MV 감상하기</h4>
-                    <p class="text-slate-600 mb-4 text-sm leading-relaxed">
-                        공식 유튜브 채널 및 스포티파이 링크를 통해 뮤직비디오와 곡을 스트리밍할 수 있습니다.
-                    </p>
-                    <div class="flex space-x-3">
-                        <a href="https://www.youtube.com/@RESCENE_official" target="_blank" class="px-4 py-2 bg-rose-500 text-white text-sm font-medium rounded-lg hover:bg-rose-600 transition">공식 유튜브</a>
-                        <a href="https://open.spotify.com" target="_blank" class="px-4 py-2 bg-slate-800 text-white text-sm font-medium rounded-lg hover:bg-slate-900 transition">스포티파이</a>
-                    </div>
-                </div>
-                <div class="aspect-video bg-slate-200 rounded-xl overflow-hidden shadow-inner">
-                    <iframe class="w-full h-full" src="https://www.youtube.com/embed/N9csCOfClAE" title="Rescene Video" allowfullscreen></iframe>
-                </div>
-            </div>
-        </section>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script>
+const CFG={url:'https://YOUR-PROJECT.supabase.co',key:'YOUR-ANON-KEY'};
 
-        <!-- Automated News Section (JS기반 자동 수신) -->
-        <section id="news">
-            <h3 class="text-2xl font-bold mb-8 text-center border-b pb-4">Latest News (자동 업데이트)</h3>
-            <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
-                <ul id="news-list" class="divide-y divide-slate-100">
-                    <li class="py-4 text-center text-slate-400">최신 소식을 불러오는 중입니다...</li>
-                </ul>
-            </div>
-        </section>
+const $=s=>document.querySelector(s),$$=s=>document.querySelectorAll(s),
+esc=s=>String(s??'').replace(/[&<>"']/g,c=>'&#'+c.charCodeAt(0)+';'),
+today=()=>new Date().toLocaleDateString('sv-SE',{timeZone:'Asia/Seoul'}),
+dd=d=>Math.round((Date.parse(d)-Date.parse(today()))/864e5),
+fd=d=>String(d||'').replaceAll('-','.'),
+rtf=new Intl.RelativeTimeFormat('ko',{numeric:'auto'}),
+ago=t=>{const s=(t-Date.now())/1e3,a=Math.abs(s);return a<60?'방금 전':a<3600?rtf.format(Math.round(s/60),'minute'):a<86400?rtf.format(Math.round(s/3600),'hour'):a<604800?rtf.format(Math.round(s/86400),'day'):new Date(t).toLocaleDateString('ko')},
+CATS=['컴백 응원','음악 이야기','자유','질문'],
+TAGS=['컴백','음악방송','차트','프로모션','활동','공지'],
+KIND={mini:['미니앨범','a'],sa:['싱글 앨범','a'],single:['디지털 싱글','s'],collab:['콜라보','s'],jp:['일본 싱글','j']},
+MEM=[['Woni','원이'],['Liv','리브'],['Minami','미나미','일본 출신 멤버 · 지바'],['May','메이'],['Zena','제나']],
+ROUTES=['home','news','music','members','board'],
+NICK=/^[\w가-힣 ]{2,12}$/,
+ERR=[[/Invalid login/i,'이메일 또는 비밀번호가 맞지 않아요.'],[/already registered/i,'이미 가입된 이메일이에요.'],[/Database error|23505|duplicate/i,'이미 사용 중인 닉네임이거나 형식이 올바르지 않아요.'],[/not confirmed/i,'이메일 인증을 먼저 완료해 주세요.'],[/Password should/i,'비밀번호는 6자 이상이어야 해요.'],[/rate limit|429/i,'요청이 많아요. 잠시 후 다시 시도해 주세요.'],[/row-level|42501|permission/i,'권한이 없어요.']],
+Q={
+news:()=>sb.from('news').select('*').order('date',{ascending:false}).order('id',{ascending:false}).limit(100),
+releases:()=>sb.from('releases').select('*').order('date',{ascending:false}),
+settings:()=>sb.from('settings').select('value').eq('key','hero').maybeSingle(),
+posts:()=>sb.from('posts').select('id,cat,title,body,user_id,created_at,profiles(nick),likes(user_id),comments(id,body,user_id,created_at,profiles(nick))').order('created_at',{ascending:false}).limit(200),
+profiles:()=>sb.from('profiles').select('*',{count:'exact',head:true})},
+APPLY={news:r=>S.news=r.data||[],releases:r=>S.releases=r.data||[],settings:r=>S.hero={...S.hero,...r.data?.value},posts:r=>S.posts=r.data||[],profiles:r=>S.members=r.count||0},
+S={got:{},news:[],releases:[],posts:[],members:0,open:new Set(),cat:'',sort:'new',mf:'',lim:15,
+hero:{title:'PULSE',sub:'네 번째 미니앨범',date:'2026-11-03',blurb:'향기 콘셉트를 이어가는 리센느의 새로운 컴백.'}},
+sb=!/YOUR-/.test(CFG.url+CFG.key)&&window.supabase?.createClient(CFG.url,CFG.key);
+let raf,tt;const dl={};
 
-    </main>
+const route=()=>{const h=location.hash.slice(1);return ROUTES.includes(h)?h:'home'},
+uid=()=>S.user?.id,
+toast=m=>{const t=$('#toast');t.textContent=m;t.hidden=false;clearTimeout(tt);tt=setTimeout(()=>t.hidden=true,3500)},
+msg=e=>ERR.find(([r])=>r.test((e.message||'')+(e.code||'')))?.[1]||'요청을 처리하지 못했어요. 다시 시도해 주세요.',
+paint=()=>raf||=requestAnimationFrame(()=>{raf=0;draw()}),
+load=async t=>{const r=await Q[t]();if(r.error)return toast(msg(r.error));APPLY[t](r);S.got[t]=1;paint()},
+later=t=>{clearTimeout(dl[t]);dl[t]=setTimeout(()=>load(t),250)},
+go=async(q,t)=>{const{error}=await q;if(error)toast(msg(error));t&&load(t);return!error},
+need=()=>S.me||(toast(S.user?'프로필을 불러오는 중이에요.':'로그인이 필요해요.'),!S.user&&sheet(authForm('in')),0),
+empty=(k,t)=>`<p class="dim">${S.got[k]?t:'불러오는 중…'}</p>`,
+setup=()=>`<div class="gate"><h3>데이터베이스 연결이 필요해요</h3><p class="dim">index.html 위쪽의 CFG에 Supabase 주소와 키를 입력해 주세요. 방법은 파일 맨 위 주석에 있어요.</p></div>`,
+arm=b=>b.dataset.arm?1:(b.dataset.arm=1,b.textContent='한 번 더 눌러 삭제',setTimeout(()=>{b.dataset.arm='';b.textContent='삭제'},3e3),0),
+link=u=>/^https:\/\//.test(u||'')?`<a href="${esc(u)}" target="_blank" rel="noopener noreferrer">기사 보기</a>`:'';
 
-    <footer class="bg-white border-t mt-20 py-8 text-center text-xs text-slate-400">
-        <p>This is a non-commercial fan-made website dedicated to RESCENE.</p>
-    </footer>
+const newsRow=(n,adm)=>`<article class="row"><time class="mono">${fd(n.date)}</time><div><span class="tag">${esc(n.tag)}</span><h3>${esc(n.title)}</h3><p>${esc(n.body)}</p>${link(n.url)}${adm?`<button class="lnk" data-a="deln" data-v="${n.id}">삭제</button>`:''}</div></article>`,
+relRow=r=>{const up=r.date>today();return `<article class="row"><time class="mono">${esc(r.dl||fd(r.date))}</time><div><div>${up?'<span class="tag f">발매 예정</span>':''}<span class="tag n">${KIND[r.kind]?.[0]||''}</span></div><h3>${esc(r.title)}</h3>${r.note?`<p>${esc(r.note)}</p>`:''}${r.tracks?.length?`<p class="tr">수록곡 · ${r.tracks.map(esc).join(' · ')}</p>`:''}</div></article>`};
 
-    <!-- 자바스크립트로 유튜브 RSS 파싱 (파이썬 역할 대체) -->
-    <script>
-        const rssUrl = "https://www.youtube.com/feeds/videos.xml?channel_id=UCZ0U3gN2gq_YjV_6D035-7g"; // 예시 주소
-        const apiUrl = `https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(rssUrl)}`;
+const vHome=()=>{
+const h=S.hero,n=dd(h.date),lab=isNaN(n)?'':n>0?'D-'+n:n?'D+'+-n:'D-DAY',t=today();
+return `<div class="hero"><p class="eye">${n>0?'NEXT RELEASE':n===0?'RELEASE DAY':'NEW RELEASE'}</p><h1>${esc(h.title)}</h1>
+<div class="hrow"><p>${esc(h.sub)} · ${fd(h.date)}<br><span class="dim">${esc(h.blurb)}</span></p>${lab?`<div class="dd">${lab}</div>`:''}</div>
+<svg class="pl" viewBox="0 0 1000 56" preserveAspectRatio="none" aria-hidden="true"><path pathLength="1" vector-effect="non-scaling-stroke" d="M0 28H380l14-14 14 28 18-40 18 52 16-34 12 8H1000"/></svg></div>
+${sb?`<section class="sec"><div class="sh"><h2>최신 소식</h2><a href="#news">전체 보기</a></div>${S.news.slice(0,3).map(x=>newsRow(x)).join('')||empty('news','아직 소식이 없어요.')}</section>
+<section class="sec"><div class="sh"><h2>최근 발매</h2><a href="#music">디스코그래피</a></div>${S.releases.filter(r=>r.date<=t).slice(0,3).map(relRow).join('')||empty('releases','아직 정보가 없어요.')}</section>
+<section class="sec"><div class="sh"><h2>커뮤니티</h2><a href="#board">커뮤니티 가기</a></div><div class="stat"><div><b>${S.members}</b><span class="dim">회원</span></div><div><b>${S.posts.length}</b><span class="dim">게시글</span></div></div></section>`:setup()}`};
 
-        fetch(apiUrl)
-            .then(res => res.json())
-            .then(data => {
-                const listEl = document.getElementById('news-list');
-                listEl.innerHTML = '';
+const vNews=()=>!sb?setup():`<div class="sh"><h2>소식</h2>${S.admin?'<button class="btn g" data-a="nform">새 소식 쓰기</button>':''}</div>${S.news.map(n=>newsRow(n,S.admin)).join('')||empty('news','아직 소식이 없어요.')}`;
 
-                if (data.items && data.items.length > 0) {
-                    data.items.slice(0, 5).forEach(item => {
-                        const date = item.pubDate.split(' ')[0];
-                        listEl.innerHTML += `
-                            <li class="py-4 flex justify-between items-center hover:bg-slate-50 px-2 rounded-lg transition">
-                                <a href="${item.link}" target="_blank" class="font-medium text-slate-700 hover:text-rose-500">${item.title}</a>
-                                <span class="text-xs text-slate-400 bg-slate-100 px-2.5 py-1 rounded-full">${date}</span>
-                            </li>
-                        `;
-                    });
-                } else {
-                    listEl.innerHTML = '<li class="py-4 text-center text-slate-400">등록된 소식이 없습니다.</li>';
-                }
-            })
-            .catch(() => {
-                document.getElementById('news-list').innerHTML = `
-                    <li class="py-4 flex justify-between items-center">
-                        <a href="https://www.youtube.com/@RESCENE_official" target="_blank" class="font-medium text-slate-700 hover:text-rose-500">[공식] RESCENE 유튜브 채널 바로가기</a>
-                        <span class="text-xs text-slate-400 bg-slate-100 px-2.5 py-1 rounded-full">Official</span>
-                    </li>
-                `;
-            });
-    </script>
+const vMusic=()=>{if(!sb)return setup();
+const F=[['','전체'],['a','앨범'],['s','싱글'],['j','일본']];
+return `<div class="sh"><h2>디스코그래피</h2></div><div class="ctl">${F.map(([v,t])=>`<button class="chip" aria-pressed="${S.mf===v}" data-a="mf" data-v="${v}">${t}</button>`).join('')}</div>${S.releases.filter(r=>!S.mf||KIND[r.kind]?.[1]===S.mf).map(relRow).join('')||empty('releases','아직 정보가 없어요.')}`};
+
+const vMembers=()=>`<div class="sh"><h2>RESCENE</h2></div><p>더뮤즈엔터테인먼트의 첫 걸그룹. 2024년 3월 26일 데뷔한 5인조로, 앨범마다 하나의 향기를 콘셉트로 삼아요.</p><div class="mem">${MEM.map(m=>`<div><b>${m[0]}</b><span>${m[1]}</span>${m[2]?`<small>${m[2]}</small>`:''}</div>`).join('')}</div>`;
+
+const vBoard=()=>{if(!sb)return setup();
+const me=uid(),ps=S.posts.filter(p=>!S.cat||p.cat===S.cat).sort(S.sort==='top'?(a,b)=>b.likes.length-a.likes.length||b.created_at.localeCompare(a.created_at):(a,b)=>b.created_at.localeCompare(a.created_at));
+const post=p=>{const del=p.user_id===me||S.admin,on=p.likes.some(l=>l.user_id===me),cs=[...p.comments].sort((a,b)=>a.created_at.localeCompare(b.created_at));
+return `<article class="post"><div class="meta"><b>${esc(p.profiles?.nick||'탈퇴한 회원')}</b><span>${ago(Date.parse(p.created_at))}</span><span class="tag">${esc(p.cat)}</span></div><h3>${esc(p.title)}</h3><p class="bd">${esc(p.body)}</p>
+<div class="acts"><button class="${on?'on':''}" data-a="like" data-v="${p.id}" aria-pressed="${on}"><svg viewBox="0 0 24 24"><path d="M12 20.5s-8-4.9-8-10.6A4.4 4.4 0 0 1 12 7.3a4.4 4.4 0 0 1 8 2.6c0 5.7-8 10.6-8 10.6z"/></svg>추천 ${p.likes.length}</button><button data-a="cm" data-v="${p.id}">댓글 ${cs.length}</button>${del?`<button data-a="delp" data-v="${p.id}">삭제</button>`:''}</div>
+${S.open.has(p.id)?`<div class="cms">${cs.map(c=>`<div class="cm"><b>${esc(c.profiles?.nick||'탈퇴한 회원')}</b>${esc(c.body)}<small>${ago(Date.parse(c.created_at))}</small>${c.user_id===me||S.admin?` <button class="lnk" data-a="delc" data-v="${c.id}">삭제</button>`:''}</div>`).join('')}
+${S.me?`<form class="cf" data-k="${p.id}"><input id="ci-${p.id}" data-cin="${p.id}" maxlength="300" placeholder="댓글을 남겨 보세요" autocomplete="off" aria-label="댓글"><button class="btn">등록</button></form>`:'<p class="dim">로그인하면 댓글을 쓸 수 있어요.</p>'}</div>`:''}</article>`};
+return `<div class="sh"><h2>커뮤니티</h2>${S.me?'<button class="btn" data-a="write">글쓰기</button>':'<button class="btn" data-a="auth" data-v="in">로그인하고 글쓰기</button>'}</div>
+<div class="ctl">${['',...CATS].map(c=>`<button class="chip" aria-pressed="${S.cat===c}" data-a="cat" data-v="${c}">${c||'전체'}</button>`).join('')}<span class="sp"></span>${[['new','최신순'],['top','추천순']].map(([v,t])=>`<button class="chip" aria-pressed="${S.sort===v}" data-a="sort" data-v="${v}">${t}</button>`).join('')}</div>
+<div class="feed">${ps.slice(0,S.lim).map(post).join('')||empty('posts','첫 글을 남겨 보세요.')}</div>${ps.length>S.lim?'<p style="margin-top:16px"><button class="btn g" data-a="more">더 보기</button></p>':''}`};
+
+const V={home:vHome,news:vNews,music:vMusic,members:vMembers,board:vBoard};
+
+const acct=()=>!sb||!S.init?'':S.me?`<button class="who" data-a="me">${S.admin?'<span class="tag f">관리</span>':''}${esc(S.me.nick)}</button>`:S.user?'':'<button class="btn g" data-a="auth" data-v="in">로그인</button><button class="btn" data-a="auth" data-v="up">회원가입</button>';
+
+function draw(){
+const r=route();
+$('#acct').innerHTML=acct();
+$$('main>section').forEach(s=>s.hidden=s.id!=='p-'+r);
+$$('nav a').forEach(a=>a.hash==='#'+r?a.setAttribute('aria-current','page'):a.removeAttribute('aria-current'));
+$('#nf').hidden=!(S.admin&&S.nform&&r==='news');
+$('#pf').hidden=!(S.me&&S.compose&&r==='board');
+const a=document.activeElement;
+if(a?.tagName==='INPUT'&&a.value&&a.closest('#v-board')){S.dirty=1;return}
+const f=a?.dataset?.cin;
+$('#v-'+r).innerHTML=V[r]();
+if(f)$(`[data-cin="${CSS.escape(f)}"]`)?.focus();
+}
+
+const RULES='<ul class="rules"><li>멤버와 다른 팬을 존중해 주세요.</li><li>사생활 침해, 비방, 불법 촬영물 공유는 금지예요.</li><li>유출·불법 음원 링크는 올리지 않아요.</li></ul>',
+authForm=m=>{const up=m==='up';return `<h2>${up?'회원가입':'로그인'}</h2>
+<form id="af" data-m="${m}"><label for="ae">이메일<input id="ae" name="e" type="email" required autocomplete="email"></label>
+<label for="ap">비밀번호 (6자 이상)<input id="ap" name="p" type="password" minlength="6" required autocomplete="${up?'new-password':'current-password'}"></label>
+${up?`<label for="an">닉네임 (2~12자)<input id="an" name="n" maxlength="12" required autocomplete="off"></label>${RULES}<label class="ck" for="ak"><input id="ak" name="k" type="checkbox">이용 규칙에 동의합니다</label>`:''}
+<div class="btns"><button class="btn">${up?'가입하기':'로그인'}</button><button type="button" class="btn g" data-a="close">닫기</button></div></form>
+<p class="dim">${up?'이미 회원이신가요?':'처음이신가요?'} <button class="lnk" data-a="auth" data-v="${up?'in':'up'}">${up?'로그인':'회원가입'}</button></p>`},
+profForm=()=>`<h2>프로필</h2><p class="dim">${esc(S.user.email)}</p>
+<form id="jf"><label for="jn">닉네임 (2~12자)<input id="jn" name="n" value="${esc(S.me.nick)}" maxlength="12" required autocomplete="off"></label><div class="btns"><button class="btn">저장</button><button type="button" class="btn g" data-a="close">닫기</button></div></form>
+<hr><div class="btns"><button class="btn g" data-a="logout">로그아웃</button><button class="lnk" data-a="leave">회원 탈퇴 (계정과 모든 글 삭제)</button></div>`,
+sheet=h=>{$('#sheet').hidden=!h;if(h){$('#sp').innerHTML=h;$('#sp').querySelector('input,button')?.focus()}};
+
+document.addEventListener('click',e=>{
+if(e.target.id==='sheet')return sheet();
+const b=e.target.closest('[data-a]');if(!b)return;
+const a=b.dataset.a,v=b.dataset.v;
+({auth:()=>sheet(authForm(v)),me:()=>sheet(profForm()),close:()=>sheet(),
+logout:()=>{sb.auth.signOut();sheet();toast('로그아웃했어요.')},
+write:()=>{if(need()){S.compose=!S.compose;draw()}},
+nform:()=>{S.nform=!S.nform;$('#nd').value||=today();draw()},
+like:()=>{if(!need())return;const p=S.posts.find(p=>p.id==v),had=p.likes.some(l=>l.user_id===uid());
+p.likes=had?p.likes.filter(l=>l.user_id!==uid()):[...p.likes,{user_id:uid()}];paint();
+go(had?sb.from('likes').delete().match({post_id:p.id,user_id:uid()}):sb.from('likes').insert({post_id:p.id}),'posts')},
+cm:()=>{S.open.has(+v)?S.open.delete(+v):S.open.add(+v);paint()},
+delp:()=>arm(b)&&go(sb.from('posts').delete().eq('id',v),'posts'),
+delc:()=>arm(b)&&go(sb.from('comments').delete().eq('id',v),'posts'),
+deln:()=>arm(b)&&go(sb.from('news').delete().eq('id',v),'news'),
+more:()=>{S.lim+=15;paint()},cat:()=>{S.cat=v;S.lim=15;paint()},sort:()=>{S.sort=v;paint()},mf:()=>{S.mf=v;paint()},
+leave:async()=>{if(!arm(b))return;if(await go(sb.rpc('delete_me'))){await sb.auth.signOut();sheet();toast('탈퇴 처리했어요.')}}
+})[a]?.();
+});
+
+document.addEventListener('submit',async e=>{
+e.preventDefault();const f=e.target,x=new FormData(f),g=k=>String(x.get(k)||'').trim();
+if(f.id==='af'){const up=f.dataset.m==='up',n=g('n');
+if(up&&!NICK.test(n))return toast('닉네임은 한글·영문·숫자 2~12자로 입력해 주세요.');
+if(up&&!x.get('k'))return toast('이용 규칙에 동의해 주세요.');
+const{data,error}=up?await sb.auth.signUp({email:g('e'),password:x.get('p'),options:{data:{nick:n}}}):await sb.auth.signInWithPassword({email:g('e'),password:x.get('p')});
+if(error)return toast(msg(error));
+sheet();toast(!up?'로그인했어요.':data.session?'가입을 환영해요!':'인증 메일을 보냈어요. 메일의 링크를 누른 뒤 로그인해 주세요.')}
+else if(f.id==='jf'){const n=g('n');if(!NICK.test(n))return toast('닉네임은 한글·영문·숫자 2~12자로 입력해 주세요.');
+if(await go(sb.from('profiles').update({nick:n}).eq('id',uid()),'posts')){await loadMe();sheet();toast('저장했어요.')}}
+else if(f.id==='pf'&&need()){
+if(await go(sb.from('posts').insert({cat:g('c'),title:g('t').slice(0,60),body:g('b').slice(0,1500)}),'posts')){f.reset();S.compose=false;S.sort='new';draw()}}
+else if(f.id==='nf'&&S.admin){
+if(await go(sb.from('news').insert({tag:g('g'),title:g('t'),body:g('b'),url:g('u')||null,date:g('d')}),'news')){f.reset();S.nform=false;draw()}}
+else if(f.classList.contains('cf')&&need()){const i=f.querySelector('input'),b=i.value.trim().slice(0,300);if(!b)return;
+i.value='';S.dirty=0;await go(sb.from('comments').insert({post_id:+f.dataset.k,body:b}),'posts')}
+});
+
+document.addEventListener('keydown',e=>e.key==='Escape'&&sheet());
+document.addEventListener('focusout',()=>S.dirty&&setTimeout(()=>{S.dirty=0;paint()},400));
+addEventListener('hashchange',()=>{scrollTo(0,0);paint()});
+
+async function loadMe(){
+const r=S.user?await sb.from('profiles').select('*').eq('id',uid()).maybeSingle():{};
+S.me=r.data||null;S.admin=!!r.data?.is_admin;S.init=1;paint()}
+
+$('#ng').innerHTML=TAGS.map(t=>`<option>${t}</option>`).join('');
+$('#pc').innerHTML=CATS.map(t=>`<option>${t}</option>`).join('');
+paint();
+
+if(sb){
+sb.auth.onAuthStateChange((_,s)=>{S.user=s?.user||null;setTimeout(loadMe)});
+Object.keys(Q).forEach(load);
+sb.channel('live').on('postgres_changes',{event:'*',schema:'public'},p=>{
+const t=p.table;later(t==='comments'||t==='likes'||t==='profiles'?'posts':t);t==='profiles'&&later('profiles')}).subscribe();
+}
+</script>
 </body>
 </html>
